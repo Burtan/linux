@@ -2605,7 +2605,7 @@ static int snd_bbfpro_controls_create(struct usb_mixer_interface *mixer)
 /*
  * RME Babyface
  *
- * These devices exposes a couple of DSP functions via request to EP0.
+ * This device exposes a couple of DSP functions via request to EP0.
  * Switches are available via control registers, while routing is controlled
  * by controlling the volume on each possible crossing point.
  * Volume control is linear, from -inf (dec. 0) to +6dB (dec. 65536) with
@@ -2616,6 +2616,7 @@ enum {
 	SND_BBF_CTL_REG2
 };
 
+// TODO values are not confirmed by RME, they were copied from Babyface Pro
 #define SND_BBF_CTL_REG_MASK 1
 #define SND_BBF_CTL_IDX_MASK 0xff
 #define SND_BBF_CTL_IDX_SHIFT 1
@@ -2623,13 +2624,9 @@ enum {
 #define SND_BBF_CTL_VAL_SHIFT 9
 #define SND_BBF_CTL_REG1_CLK_MASTER 0
 #define SND_BBF_CTL_REG1_CLK_OPTICAL 1
-#define SND_BBF_CTL_REG1_SPDIF_PRO 7
-#define SND_BBF_CTL_REG1_SPDIF_EMPH 8
 #define SND_BBF_CTL_REG1_SPDIF_OPTICAL 10
 #define SND_BBF_CTL_REG2_48V_AN1 0
 #define SND_BBF_CTL_REG2_48V_AN2 1
-#define SND_BBF_CTL_REG2_PAD_AN1 4
-#define SND_BBF_CTL_REG2_PAD_AN2 5
 
 #define SND_BBF_MIXER_IDX_MASK 0x1ff
 #define SND_BBF_MIXER_VAL_MASK 0x3ffff
@@ -2687,11 +2684,8 @@ static int snd_bbf_ctl_get(struct snd_kcontrol *kcontrol,
 	idx = (pv >> SND_BBF_CTL_IDX_SHIFT) & SND_BBF_CTL_IDX_MASK;
 	val = kcontrol->private_value >> SND_BBF_CTL_VAL_SHIFT;
 
-	if ((reg == SND_BBF_CTL_REG1 &&
-	     idx == SND_BBF_CTL_REG1_CLK_OPTICAL) ||
-	    (reg == SND_BBF_CTL_REG2 &&
-	    (idx == SND_BBF_CTL_REG2_SENS_IN3 ||
-	     idx == SND_BBF_CTL_REG2_SENS_IN4))) {
+	if ((reg == SND_BBF_CTL_REG1 && idx == SND_BBF_CTL_REG1_CLK_OPTICAL) ||
+	    reg == SND_BBF_CTL_REG2) {
 		ucontrol->value.enumerated.item[0] = val;
 	} else {
 		ucontrol->value.integer.value[0] = val;
@@ -2713,14 +2707,6 @@ static int snd_bbf_ctl_info(struct snd_kcontrol *kcontrol,
 		static const char * const texts[2] = {
 			"AutoSync",
 			"Internal"
-		};
-		return snd_ctl_enum_info(uinfo, 1, 2, texts);
-	} else if (reg == SND_BBF_CTL_REG2 &&
-		  (idx == SND_BBF_CTL_REG2_SENS_IN3 ||
-		   idx == SND_BBF_CTL_REG2_SENS_IN4)) {
-		static const char * const texts[2] = {
-			"-10dBV",
-			"+4dBu"
 		};
 		return snd_ctl_enum_info(uinfo, 1, 2, texts);
 	}
@@ -2747,11 +2733,8 @@ static int snd_bbf_ctl_put(struct snd_kcontrol *kcontrol,
 	idx = (pv >> SND_BBF_CTL_IDX_SHIFT) & SND_BBF_CTL_IDX_MASK;
 	old_value = (pv >> SND_BBF_CTL_VAL_SHIFT) & SND_BBF_CTL_VAL_MASK;
 
-	if ((reg == SND_BBF_CTL_REG1 &&
-	     idx == SND_BBF_CTL_REG1_CLK_OPTICAL) ||
-	    (reg == SND_BBF_CTL_REG2 &&
-	    (idx == SND_BBF_CTL_REG2_SENS_IN3 ||
-	     idx == SND_BBF_CTL_REG2_SENS_IN4))) {
+	if ((reg == SND_BBF_CTL_REG1 && idx == SND_BBF_CTL_REG1_CLK_OPTICAL) ||
+	    reg == SND_BBF_CTL_REG2) {
 		val = ucontrol->value.enumerated.item[0];
 	} else {
 		val = ucontrol->value.integer.value[0];
@@ -2853,15 +2836,14 @@ static int snd_bbf_vol_put(struct snd_kcontrol *kcontrol,
 
 	new_val = uvalue & SND_BBF_MIXER_VAL_MASK;
 
-	kcontrol->private_value = idx
-		| (new_val << SND_BBF_MIXER_VAL_SHIFT);
+	kcontrol->private_value = idx | (new_val << SND_BBF_MIXER_VAL_SHIFT);
 
 	err = snd_bbf_vol_update(mixer, idx, new_val);
 	return err < 0 ? err : 1;
 }
 
 static int snd_bbf_vol_resume(struct usb_mixer_elem_list *list)
-	{
+{
 	int pv = list->kctl->private_value;
 	u16 idx = pv & SND_BBF_MIXER_IDX_MASK;
 	u32 val = (pv >> SND_BBF_MIXER_VAL_SHIFT) & SND_BBF_MIXER_VAL_MASK;
@@ -2914,33 +2896,50 @@ static int snd_bbf_vol_add(struct usb_mixer_interface *mixer, u16 index,
 
 static int snd_bbf_controls_create(struct usb_mixer_interface *mixer)
 {
-	int err, i, o;
+	int err, swout, hwin, hwout;
 	char name[48];
 
-	static const char * const input[] = {
-		"AN1", "AN2", "AS1", "AS2", "ADAT3",
-		"ADAT4", "ADAT5", "ADAT6", "ADAT7", "ADAT8"};
+	// BBF offers 10 hardware input channels (8 via ADAT), 12 software
+	// output channels and 12 hardware output channels (8 via ADAT). You can
+	// route freely from hardware input channels and software output
+	// channels to hardware output channels.
 
-	static const char * const output[] = {
-		"AN1", "AN2", "PH3", "PH4", "AS1", "AS2", "ADAT3", "ADAT4",
-		"ADAT5", "ADAT6", "ADAT7", "ADAT8"};
+	// TODO usb indices of channels might not be correct
 
-	for (o = 0 ; o < 12 ; ++o) {
-		for (i = 0 ; i < 10 ; ++i) {
-			// Line routing
-			snprintf(name, sizeof(name),
-				 "%s-%s-%s Playback Volume",
-				 (i < 2 ? "Mic" : "Line"),
-				 input[i], output[o]);
-			err = snd_bbf_vol_add(mixer, (26 * o + i), name);
+	// 10 hw inputs
+	static const char * const hwins[] = {
+		"IN1 (Mic L)", "IN2 (Mic R)", "IN3 (ADAT1)", "IN4 (ADAT2)",
+		"IN5 (ADAT3)", "IN6 (ADAT4)", "IN7 (ADAT5)", "IN8 (ADAT6)",
+		"IN9 (ADAT7)", "IN10 (ADAT8)"};
+
+	// 12 sw outputs (matches hw output count)
+	static const char * const swouts[] = {
+		"SW1", "SW2", "SW3", "SW4", "SW5",
+		"SW6", "SW7", "SW8", "SW9", "SW10", "SW11", "SW12"};
+
+	// 12 hw outputs
+	static const char * const hwouts[] = {
+		"HW1 (XLR-L)", "HW2 (XLR-R)", "HW3 (Ph-L)", "HW4 (Ph-R)",
+		"HW5 (ADAT1)", "HW6 (ADAT2)", "HW7 (ADAT3)", "HW8 (ADAT4)",
+		"HW9 (ADAT5)", "HW10 (ADAT6)", "HW11 (ADAT7)", "HW12 (ADAT8)"};
+
+	// hwins to hwouts (120 channels)
+	for (hwin = 0 ; hwin < 10 ; ++hwin) {
+		for (hwout = 0 ; hwout < 12; ++hwout) {
+			snprintf(name, sizeof(name), "%s -> %s Volume",
+				 hwins[hwin], hwouts[hwout]);
+			err = snd_bbf_vol_add(mixer, (hwin * hwout), name);
 			if (err < 0)
 				return err;
+		}
+	}
 
-			// PCM routing... yes, it is output remapping
-			snprintf(name, sizeof(name),
-				 "PCM-%s-%s Playback Volume",
-				 output[i], output[o]);
-			err = snd_bbf_vol_add(mixer, (26 * o + 12 + i), name);
+	// swouts to hwouts (144 channels)
+	for (swout = 0 ; swout < 10 ; ++swout) {
+		for (hwout = 0 ; hwout < 12; ++hwout) {
+			snprintf(name, sizeof(name), "%s -> %s Volume",
+				 swouts[swout], hwouts[hwout]);
+			err = snd_bbf_vol_add(mixer, (120 + swout * hwout), name);
 			if (err < 0)
 				return err;
 		}
@@ -2954,18 +2953,6 @@ static int snd_bbf_controls_create(struct usb_mixer_interface *mixer)
 		return err;
 
 	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG1,
-				 SND_BBF_CTL_REG1_SPDIF_PRO,
-				 "IEC958 Pro Mask");
-	if (err < 0)
-		return err;
-
-	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG1,
-				 SND_BBF_CTL_REG1_SPDIF_EMPH,
-				 "IEC958 Emphasis");
-	if (err < 0)
-		return err;
-
-	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG1,
 				 SND_BBF_CTL_REG1_SPDIF_OPTICAL,
 				 "IEC958 Switch");
 	if (err < 0)
@@ -2974,25 +2961,13 @@ static int snd_bbf_controls_create(struct usb_mixer_interface *mixer)
 	// Control Reg 2
 	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG2,
 				 SND_BBF_CTL_REG2_48V_AN1,
-				 "Mic-AN1 48V");
+				 "Mic 1 48V");
 	if (err < 0)
 		return err;
 
 	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG2,
 				 SND_BBF_CTL_REG2_48V_AN2,
-				 "Mic-AN2 48V");
-	if (err < 0)
-		return err;
-
-	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG2,
-				 SND_BBF_CTL_REG2_PAD_AN1,
-				 "Mic-AN1 PAD");
-	if (err < 0)
-		return err;
-
-	err = snd_bbf_ctl_add(mixer, SND_BBF_CTL_REG2,
-				 SND_BBF_CTL_REG2_PAD_AN2,
-				 "Mic-AN2 PAD");
+				 "Mic 2 48V");
 	if (err < 0)
 		return err;
 
